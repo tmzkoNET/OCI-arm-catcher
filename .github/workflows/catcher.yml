@@ -3,12 +3,12 @@ name: OCI ARM Instance Catcher (Aggressive Loop)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *' # Sproži se na vsake 4 ure
+    - cron: '0 */4 * * *'
 
 jobs:
   launch-instance:
     runs-on: ubuntu-latest
-    timeout-minutes: 300 # Teče do 5 ur
+    timeout-minutes: 300
     steps:
       - name: Namestitev OCI CLI
         run: |
@@ -54,14 +54,12 @@ jobs:
 
           echo "Uporabljam sliko: $IMAGE_ID"
 
-          # Začetek 5-urne zanke
-          END_TIME=$((SECONDS + 17500)) # ~4.8 ur
+          END_TIME=$((SECONDS + 17500))
           POSKUS=1
 
           while [ $SECONDS -lt $END_TIME ]; do
             echo "--- Poskus #$POSKUS ($(date '+%H:%M:%S')) ---"
             
-            # Preverimo, če je morda že ustvarjena
             RUNNING=$(oci compute instance list \
               --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
               --lifecycle-state RUNNING \
@@ -73,7 +71,6 @@ jobs:
               exit 0
             fi
 
-            # Pošljemo zahtevek
             OUTPUT=$(oci compute instance launch \
               --availability-domain "oNUv:eu-amsterdam-1-AD-1" \
               --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
