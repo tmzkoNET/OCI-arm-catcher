@@ -1,0 +1,92 @@
+name: OCI ARM Instance Catcher
+
+on:
+  workflow_dispatch: # Omogoča ročni zagon kadarkoli
+  schedule:
+    - cron: '*/10 * * * *' # Samodejni zagon na vsakih 10 minut
+
+jobs:
+  launch-instance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Namestitev OCI CLI
+        run: |
+          bash -c "$(curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)" -- --accept-all-defaults
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Konfiguracija OCI profilnih podatkov
+        env:
+          OCI_USER: ${{ secrets.OCI_USER_OCID }}
+          OCI_TENANCY: ${{ secrets.OCI_TENANCY_OCID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_KEY_FINGERPRINT }}
+          OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_KEY: ${{ secrets.OCI_KEY_CONTENT }}
+        run: |
+          mkdir -p ~/.oci
+          echo "$OCI_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+
+          cat <<EOF > ~/.oci/config
+          [DEFAULT]
+          user=$OCI_USER
+          fingerprint=$OCI_FINGERPRINT
+          key_file=~/.oci/oci_api_key.pem
+          tenancy=$OCI_TENANCY
+          region=$OCI_REGION
+          EOF
+
+      - name: Preverjanje ali instanca že obstaja
+        id: check_instance
+        run: |
+          RUNNING_INSTANCES=$(oci compute instance list \
+            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+            --lifecycle-state RUNNING \
+            --query "data[?\"lifecycle-state\"=='RUNNING'].id" \
+            --raw-output)
+
+          if [ "$RUNNING_INSTANCES" != "[]" ] && [ -n "$RUNNING_INSTANCES" ]; then
+            echo "Instanca že obstaja in teče!"
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Poskus zagona ARM instance (2 OCPU / 12 GB RAM)
+        if: steps.check_instance.outputs.exists == 'false'
+        env:
+          SSH_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          echo "$SSH_KEY" > ~/.ssh_authorized_keys
+
+          # Pridobitev najnovejše Ubuntu ARM slike
+          IMAGE_ID=$(oci compute image list \
+            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+            --operating-system "Canonical Ubuntu" \
+            --shape "VM.Standard.A1.Flex" \
+            --sort-by TIMECREATED --sort-order DESC \
+            --query "data[0].id" --raw-output)
+
+          echo "Uporabljam sliko: $IMAGE_ID"
+
+          # Poskus zagona instance
+          RESPONSE=$(oci compute instance launch \
+            --availability-domain "oNUv:eu-amsterdam-1-AD-1" \
+            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus": 2, "memoryInGBs": 12}' \
+            --image-id "$IMAGE_ID" \
+            --subnet-id "ocid1.subnet.oc1.eu-amsterdam-1.aaaaaaaa7jcqkfmxpr5xiprgob6ah7lunqw67i3dnkyrdck3pupcjhsawj7a" \
+            --assign-public-ip true \
+            --display-name "moj-arm-streznik" \
+            --ssh-authorized-keys-file ~/.ssh_authorized_keys \
+            --boot-volume-size-in-gbs 50 2>&1) || true
+
+          echo "$RESPONSE"
+
+          if echo "$RESPONSE" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+            echo "🎉 USPEH: ARM instanca se uspešno ustvarja!"
+          elif echo "$RESPONSE" | grep -q "OutOfHostCapacity"; then
+            echo "Trenutno ni prostih ARM kapacitet v Amsterdamu. Poskusimo znova ob naslednjem zagonu."
+          else
+            echo "Izpis poizvedbe: $RESPONSE"
+          fi
