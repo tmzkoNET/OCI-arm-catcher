@@ -1,13 +1,14 @@
-name: OCI ARM Instance Catcher
+name: OCI ARM Instance Catcher (Aggressive Loop)
 
 on:
-  workflow_dispatch: # Omogoča ročni zagon kadarkoli
+  workflow_dispatch:
   schedule:
-    - cron: '*/10 * * * *' # Samodejni zagon na vsakih 10 minut
+    - cron: '0 */4 * * *' # Sproži se na vsake 4 ure
 
 jobs:
   launch-instance:
     runs-on: ubuntu-latest
+    timeout-minutes: 300 # Teče do 5 ur
     steps:
       - name: Namestitev OCI CLI
         run: |
@@ -34,31 +35,16 @@ jobs:
           tenancy=$OCI_TENANCY
           region=$OCI_REGION
           EOF
+          chmod 600 ~/.oci/config
 
-      - name: Preverjanje ali instanca že obstaja
-        id: check_instance
-        run: |
-          RUNNING_INSTANCES=$(oci compute instance list \
-            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
-            --lifecycle-state RUNNING \
-            --query "data[?\"lifecycle-state\"=='RUNNING'].id" \
-            --raw-output)
-
-          if [ "$RUNNING_INSTANCES" != "[]" ] && [ -n "$RUNNING_INSTANCES" ]; then
-            echo "Instanca že obstaja in teče!"
-            echo "exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Poskus zagona ARM instance (2 OCPU / 12 GB RAM)
-        if: steps.check_instance.outputs.exists == 'false'
+      - name: Lovljenje ARM instance (zanka na 30 sekund)
         env:
           SSH_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          SUPPRESS_LABEL_WARNING: "True"
+          OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING: "True"
         run: |
           echo "$SSH_KEY" > ~/.ssh_authorized_keys
 
-          # Pridobitev najnovejše Ubuntu ARM slike
           IMAGE_ID=$(oci compute image list \
             --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
             --operating-system "Canonical Ubuntu" \
@@ -68,25 +54,47 @@ jobs:
 
           echo "Uporabljam sliko: $IMAGE_ID"
 
-          # Poskus zagona instance
-          RESPONSE=$(oci compute instance launch \
-            --availability-domain "oNUv:eu-amsterdam-1-AD-1" \
-            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
-            --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus": 2, "memoryInGBs": 12}' \
-            --image-id "$IMAGE_ID" \
-            --subnet-id "ocid1.subnet.oc1.eu-amsterdam-1.aaaaaaaa7jcqkfmxpr5xiprgob6ah7lunqw67i3dnkyrdck3pupcjhsawj7a" \
-            --assign-public-ip true \
-            --display-name "moj-arm-streznik" \
-            --ssh-authorized-keys-file ~/.ssh_authorized_keys \
-            --boot-volume-size-in-gbs 50 2>&1) || true
+          # Začetek 5-urne zanke
+          END_TIME=$((SECONDS + 17500)) # ~4.8 ur
+          POSKUS=1
 
-          echo "$RESPONSE"
+          while [ $SECONDS -lt $END_TIME ]; do
+            echo "--- Poskus #$POSKUS ($(date '+%H:%M:%S')) ---"
+            
+            # Preverimo, če je morda že ustvarjena
+            RUNNING=$(oci compute instance list \
+              --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+              --lifecycle-state RUNNING \
+              --query "data[?\"lifecycle-state\"=='RUNNING'].id" \
+              --raw-output)
 
-          if echo "$RESPONSE" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-            echo "🎉 USPEH: ARM instanca se uspešno ustvarja!"
-          elif echo "$RESPONSE" | grep -q "OutOfHostCapacity"; then
-            echo "Trenutno ni prostih ARM kapacitet v Amsterdamu. Poskusimo znova ob naslednjem zagonu."
-          else
-            echo "Izpis poizvedbe: $RESPONSE"
-          fi
+            if [ "$RUNNING" != "[]" ] && [ -n "$RUNNING" ]; then
+              echo "🎉 INSTANCA ŽE TEČE! Ustavljam zanko."
+              exit 0
+            fi
+
+            # Pošljemo zahtevek
+            OUTPUT=$(oci compute instance launch \
+              --availability-domain "oNUv:eu-amsterdam-1-AD-1" \
+              --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config '{"ocpus": 2, "memoryInGBs": 12}' \
+              --image-id "$IMAGE_ID" \
+              --subnet-id "ocid1.subnet.oc1.eu-amsterdam-1.aaaaaaaa7jcqkfmxpr5xiprgob6ah7lunqw67i3dnkyrdck3pupcjhsawj7a" \
+              --assign-public-ip true \
+              --display-name "moj-arm-streznik" \
+              --ssh-authorized-keys-file ~/.ssh_authorized_keys \
+              --boot-volume-size-in-gbs 50 2>&1) || true
+
+            if echo "$OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+              echo "🎉 USPEH! Strežnik je bil uspešno ustvarjen!"
+              exit 0
+            elif echo "$OUTPUT" | grep -q "OutOfHostCapacity"; then
+              echo "Status: Out of host capacity (zasedeno). Čakam 30 sekund..."
+            else
+              echo "Odziv: $OUTPUT"
+            fi
+
+            POSKUS=$((POSKUS + 1))
+            sleep 30
+          done
