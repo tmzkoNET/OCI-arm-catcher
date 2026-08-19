@@ -37,7 +37,7 @@ jobs:
           EOF
           chmod 600 ~/.oci/config
 
-      - name: Lovljenje ARM instance (zanka na 30 sekund)
+      - name: Lovljenje ARM instance (1 OCPU / 6 GB RAM)
         env:
           SSH_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
           SUPPRESS_LABEL_WARNING: "True"
@@ -75,7 +75,7 @@ jobs:
               --availability-domain "oNUv:eu-amsterdam-1-AD-1" \
               --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
               --shape "VM.Standard.A1.Flex" \
-              --shape-config '{"ocpus": 2, "memoryInGBs": 12}' \
+              --shape-config '{"ocpus": 1, "memoryInGBs": 6}' \
               --image-id "$IMAGE_ID" \
               --subnet-id "ocid1.subnet.oc1.eu-amsterdam-1.aaaaaaaa7jcqkfmxpr5xiprgob6ah7lunqw67i3dnkyrdck3pupcjhsawj7a" \
               --assign-public-ip true \
